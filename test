@@ -1,1 +1,72 @@
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$CsvPath,
 
+    [Parameter(Mandatory=$true)]
+    [string]$DomainDN,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$WhatIf,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$Protect,
+
+    [Parameter(Mandatory=$false)]
+    [System.Management.Automation.PSCredential]$Credential
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+    throw 'The ActiveDirectory module is required. Install RSAT or run on a domain-joined admin host.'
+}
+Import-Module ActiveDirectory -ErrorAction Stop
+
+if (-not (Test-Path -LiteralPath $CsvPath)) {
+    throw "CSV not found: $CsvPath"
+}
+
+$csv = Import-Csv -LiteralPath $CsvPath
+
+foreach ($row in $csv) {
+    $name = $row.Name
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+
+    $parentOu = $row.ParentOU
+    $description = $row.Description
+    $protectRow = $row.Protect
+
+    $protectFlag = $false
+    if ($Protect.IsPresent) { $protectFlag = $true }
+    if ($protectRow) {
+        $parsed = $null
+        if ([bool]::TryParse($protectRow, [ref]$parsed)) { $protectFlag = $parsed }
+    }
+
+    $parentDn = if ([string]::IsNullOrWhiteSpace($parentOu)) { $DomainDN } else { "$parentOu,$DomainDN" }
+
+    $existing = Get-ADOrganizationalUnit -LDAPFilter "(ou=$name)" -SearchBase $parentDn -SearchScope OneLevel -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "Exists: OU=$name,$parentDn" -ForegroundColor Yellow
+        continue
+    }
+
+    $newParams = @{
+        Name = $name
+        Path = $parentDn
+        ProtectedFromAccidentalDeletion = $protectFlag
+    }
+    if ($description) { $newParams.Description = $description }
+    if ($Credential) { $newParams.Credential = $Credential }
+
+    if ($WhatIf) {
+        Write-Host "WhatIf: New-ADOrganizationalUnit -Name '$name' -Path '$parentDn' -ProtectedFromAccidentalDeletion:$protectFlag" -ForegroundColor Cyan
+        continue
+    }
+
+    New-ADOrganizationalUnit @newParams | Out-Null
+    Write-Host "Created: OU=$name,$parentDn" -ForegroundColor Green
+}
+
+Write-Host 'Done.' -ForegroundColor Green
